@@ -1,0 +1,348 @@
+---
+title: "SONYC EDA"
+author: "Lukas Lopez-Jensen"
+date: "2026-03-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ISOweek)
+library(leaflet)
+library(zoo)
+library(forecast)
+library(sf)
+library(spdep)
+library(councildown)
+```
+
+
+# Load and clean data
+```{r}
+sonyc <- read.csv("../Data/SONYC noise data annotations.csv")
+sensors <- sonyc %>% distinct(sensor_id, .keep_all = TRUE) %>% select(sensor_id, borough, block, latitude, longitude)
+siren <- sonyc %>% select(sensor_id, audio_filename, annotator_id, borough, block, latitude, longitude, year, week, day, hour, X5.3_siren_presence, X5.3_siren_proximity)
+
+siren_weekly <- siren %>%
+  filter(X5.3_siren_presence == 1) %>%
+  mutate(
+    date = ISOweek2date(
+      paste0(year, "-W", sprintf("%02d", week), "-", day + 1)
+    )
+  ) %>%
+  group_by(year, week) %>%
+  summarise(total_sirens = n(), .groups = "drop")
+
+siren_monthly <- siren %>% filter(X5.3_siren_presence == 1) %>%
+  mutate(date = ISOweek2date(paste0(year, "-W", sprintf("%02d", week), "-", day + 1))) %>% 
+  mutate(month = lubridate::floor_date(date, "month")) %>%
+  group_by(month) %>%
+  summarise(total_sirens = n(), .groups = "drop")
+
+siren_yearly <- siren %>% filter(X5.3_siren_presence == 1) %>%
+  mutate(date = ISOweek2date(paste0(year, "-W", sprintf("%02d", week), "-", day + 1))) %>% 
+  mutate(year = lubridate::floor_date(date, "year")) %>%
+  group_by(year) %>%
+  summarise(total_sirens = n(), .groups = "drop")
+
+siren_hourly <- siren %>% filter(X5.3_siren_presence == 1) %>%
+  group_by(hour) %>%
+  summarise(total_sirens = n(), .groups = "drop")
+```
+
+
+# Map of sensors
+```{r}
+leaflet(data = sensors) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -74.0, lat = 40.7, zoom = 10) %>%
+  addMarkers(
+    ~longitude, ~latitude,
+    clusterOptions = markerClusterOptions()
+  ) %>%
+  addCircleMarkers(
+    lng = ~longitude,
+    lat = ~latitude,
+    radius = 4,
+    stroke = FALSE,
+    fillOpacity = 0.7,
+    popup = ~paste("Sensor ID:", sensor_id)
+  )
+
+# No sensors in The Bronx, 1 in Queens (close to a noise camera), 12 in Brooklyn (far from noise cameras).
+# 43 of the 56 sensors are in Manhattan, and 32 of those are between Houston and 16th st. We get a half-decent match for 2 noise cameras.
+# Sensor IDs 0 and 25 appear to have the same coordinates.
+```
+
+
+# Graph Siren Sounds (Weekly/Monthly/Yearly)
+```{r}
+ggplot(siren_weekly, aes(x = interaction(year, week), y = total_sirens, group = 1)) +
+  geom_line() +
+  geom_smooth(se = FALSE) +
+  labs(
+    title = "Weekly Siren Counts in NYC",
+    x = "Week",
+    y = "Number of Sirens"
+  ) +
+  theme_minimal()
+
+ggplot(siren_monthly, aes(x = month, y = total_sirens, group = 1)) +
+  geom_line() +
+  geom_smooth(se = FALSE) +
+  scale_x_date(
+    date_breaks = "4 months",
+    date_labels = "%Y-%m"
+  ) +
+  labs(
+    title = "Monthly Siren Counts in NYC",
+    x = "Month",
+    y = "Number of Sirens"
+  ) +
+  theme_minimal()
+
+ggplot(siren_yearly, aes(x = year, y = total_sirens, group = 1)) +
+  geom_line() +
+  labs(
+    title = "Yearly Siren Counts in NYC",
+    x = "Year",
+    y = "Number of Sirens"
+  ) +
+  theme_minimal()
+
+ggplot(siren_hourly, aes(x = hour, y = total_sirens, group = 1)) +
+  geom_line() +
+  labs(
+    title = "Hourly Siren Counts in NYC",
+    x = "Time of Day (24-Hour Clock)",
+    y = "Total Sirens Heard"
+  ) +
+  coord_cartesian(ylim = c(0, 170)) +
+  theme_minimal()
+
+# Identify week-level anomalies (rolling z-score)
+siren_weekly <- siren_weekly %>%
+  arrange(year, week) %>%
+  mutate(
+    roll_mean = rollmean(total_sirens, 8, fill = NA, align = "right"),
+    roll_sd   = rollapply(total_sirens, 8, sd, fill = NA, align = "right"),
+    z = (total_sirens - roll_mean) / roll_sd,
+    spike = z > 2,
+    date = ISOweek2date(paste0(year, "-W", sprintf("%02d", week), "-1"))
+  )
+
+ggplot(siren_weekly, aes(x = date, y = total_sirens)) +
+  geom_line() +
+  geom_line(aes(y = roll_mean), linetype = "dashed") +
+  geom_point(data = subset(siren_weekly, spike), color = "red") +
+  labs(
+    title = "Weekly Siren Counts with Spikes Highlighted",
+    x = "Week",
+    y = "Number of Sirens"
+  ) +
+  theme_minimal()
+# No hotspots identified at the 4- or 6-week levels. 
+# Using an 8-week average, 3 hotspots were identified, each in the fall:
+# Weeks of 10/9/17, 11/5/18, and 9/30/19.
+```
+
+# Quick test for seasonality
+```{r}
+# Create a timeseries object
+siren_ts <- ts(siren_weekly$total_sirens, frequency = 52, start = c(2016,11))
+
+# Automatically assign best ARIMA model using AIC
+model <- auto.arima(siren_ts, seasonal = TRUE)
+summary(model)
+# Best model doesn't incorporate seasonality -> No significant seasonality. One more check to be sure.
+
+# Separate trend from seasonality and check for a pattern.
+decomp <- stl(siren_ts, s.window = "periodic")
+plot(decomp)
+# Seasonal pattern is pretty noisy, no strong indication here either.
+
+# Compare this to the models recommended by 311 dashboard for related complaints
+fit_naive <- naive(siren_ts)
+fit_tbats <- tbats(siren_ts)
+
+# Naive model fails Ljung-Box: the immediate previous value cannot predict the next.
+checkresiduals(fit_naive)
+checkresiduals(model)
+checkresiduals(fit_tbats)
+```
+
+
+# Map Siren Sounds
+```{r}
+sensor_rates <- siren %>%
+  group_by(sensor_id, latitude, longitude) %>%
+  summarise(
+    total_obs = n(),
+    total_sirens = sum(X5.3_siren_presence == 1),
+    siren_rate = total_sirens / total_obs * 100,
+    .groups = "drop") %>%
+    mutate(rate_capped = pmin(siren_rate, 12), is_outlier = siren_rate > 12)
+
+pal <- colorNumeric(pal_nycc("warm"), sensor_rates$rate_capped)
+
+# Map siren prevalence: raw and as a % of sounds heard
+leaflet(sensor_rates) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -74.0, lat = 40.7, zoom = 10) %>%
+  addCircleMarkers(
+    ~longitude, ~latitude,
+    radius = ~sqrt(total_sirens) + 1,   # size = volume
+    color = ~ifelse(is_outlier, "red", pal(rate_capped)),
+    stroke = TRUE,
+    weight = ~ifelse(is_outlier, 2, 0),
+    fillOpacity = 0.8,
+    popup = ~paste0(
+      "Sensor ID: ", sensor_id, "<br>",
+      "Total sirens: ", total_sirens, "<br>",
+      "Siren Rate: ", paste0(round(siren_rate), "%")
+    )
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = ~rate_capped,
+    title = "Siren Rate"
+  )
+
+# ID 54 in Downtown Brooklyn is a clear outlier in terms of siren rate. Any other hotspots?
+global_rate <- sum(sensor_rates$total_sirens) / sum(sensor_rates$total_obs)
+sensor_rates <- sensor_rates %>%
+  mutate(
+    expected = total_obs * global_rate,
+    variance = total_obs * global_rate * (1 - global_rate),
+    z_score = (total_sirens - expected) / sqrt(variance),
+    hotspot = z_score > 2.576   # ~99% threshold
+  )
+# 10 sensors identified
+leaflet(sensor_rates) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -74.0, lat = 40.7, zoom = 10) %>%
+  addCircleMarkers(
+    ~longitude, ~latitude,
+    radius = ~sqrt(total_sirens) + 1,   # size = volume
+    color = ~ifelse(hotspot, "orange", pal(rate_capped)),
+    stroke = TRUE,
+    weight = ~ifelse(hotspot, 2, 0),
+    fillOpacity = 0.8,
+    popup = ~paste0(
+      "Sensor ID: ", sensor_id, "<br>",
+      "Siren Rate: ", paste0(round(siren_rate), "%"), "<br>",
+      "Z-Score: ", round(z_score, 2),
+      ifelse(hotspot, "<br><b>Hotspot</b>", "")
+    )
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = ~rate_capped,
+    title = "Siren Rate"
+  )
+# Lots of orange in lower Manhattan! Let's see if that cluster is significant.
+```
+
+
+# Test for clustering
+```{r}
+# Collapse sensors with duplicate locations for cluster analysis
+sensor_collapsed <- sensor_rates %>%
+  group_by(latitude, longitude) %>%
+  summarise(
+    total_sirens = sum(total_sirens),
+    total_obs = sum(total_obs),
+    siren_rate = total_sirens / total_obs * 100,
+    n_sensors = n(),
+    .groups = "drop"
+  )
+
+sensor_sf <- st_as_sf(
+  sensor_collapsed,
+  coords = c("longitude", "latitude"),
+  crs = 4326
+)
+
+# Project for distance-based neighbors (meters)
+sensor_sf_proj <- st_transform(sensor_sf, 32618)  # UTM zone 18N
+
+coords <- st_coordinates(sensor_sf_proj)
+
+# Define neighbors within 500m
+neighbors <- dnearneigh(coords, 0, 500)
+
+weights <- nb2listw(
+  neighbors,
+  style = "W",
+  zero.policy = TRUE
+)
+
+# Getis-Ord Gi*
+gi_star <- localG(
+  sensor_sf_proj$siren_rate,
+  listw = weights,
+  zero.policy = TRUE
+)
+
+sensor_sf_proj$GiZ <- as.numeric(gi_star)
+
+# Hotspot threshold:
+# 99% significance level ~= z > 2.58
+sensor_sf_proj$hotspot <- sensor_sf_proj$GiZ > 2.58
+
+# Back to WGS84 for Leaflet
+sensor_sf_leaflet <- st_transform(sensor_sf_proj, 4326)
+
+# Color palette = siren rate
+pal <- colorNumeric(
+  palette = pal_nycc("warm"),
+  domain = sensor_sf_leaflet$siren_rate
+)
+
+leaflet(sensor_sf_leaflet) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -74.0, lat = 40.7, zoom = 10) %>%
+  addCircleMarkers(
+    radius = ~sqrt(total_sirens) + 3,   # size = siren volume
+    
+    # Orange outline for hotspots, otherwise rate color
+    color = ~ifelse(hotspot, "blue", pal(siren_rate)),
+    
+    # Keep fill tied to siren rate
+    fillColor = ~pal(siren_rate),
+    
+    stroke = TRUE,
+    weight = ~ifelse(hotspot, 2, 0),
+    
+    fillOpacity = 0.8,
+    
+    popup = ~paste0(
+      "<b>Siren Rate:</b> ",
+      round(siren_rate), "%<br>",
+      
+      "<b>Total Sirens:</b> ",
+      total_sirens, "<br>",
+      
+      "<b>Gi* Z-Score:</b> ",
+      round(GiZ, 2),
+      
+      ifelse(
+        hotspot,
+        "<br><b style='color:blue;'>Hotspot (p < 0.01)</b>",
+        ""
+      )
+    )
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = ~siren_rate,
+    title = "Siren Rate (%)"
+  )
+
+# Indicates that Downtown Brooklyn might be a siren hotspot compared to Lower Manhattan!
+```
+

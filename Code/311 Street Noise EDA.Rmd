@@ -1,0 +1,320 @@
+---
+title: "311 Street Noise EDA"
+author: "Lukas Lopez-Jensen"
+date: "2026-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ISOweek)
+library(leaflet)
+library(zoo)
+library(forecast)
+library(spdep)
+library(sf)
+library(dbscan)
+```
+
+
+# Load and clean data
+```{r}
+noise <- read.csv("../Data/311_Service_Requests.csv")
+# List all types and descriptors
+unique(noise$Problem..formerly.Complaint.Type)
+unique(noise$Problem.Detail..formerly.Descriptor.)
+
+noise <- noise %>%
+  mutate(Created.Date = mdy_hms(Created.Date), Closed.Date = mdy_hms(Closed.Date), 
+         Resolution.Action.Updated.Date = mdy_hms(Resolution.Action.Updated.Date))
+# Considering dropping 1.5% of observations: without lat/long, these are marginally more difficult to geocode.
+noise_ll <- noise %>% filter(!is.na(Latitude))
+range(noise_ll$Created.Date)
+# Date range aligns with SONYC
+
+noise_ll <- noise_ll %>% select(Problem..formerly.Complaint.Type., Problem.Detail..formerly.Descriptor., 
+                                Created.Date, Latitude, Longitude, Location)
+
+noise_ll$week <- strftime(noise_ll$Created.Date, format = "%V") %>% as.numeric()
+noise_ll$month <- format(noise_ll$Created.Date, "%Y-%m")
+noise_ll$month <- as.Date(paste0(noise_ll$month, "-01"), format = "%Y-%m-%d")
+noise_ll$year <- format(noise_ll$Created.Date, "%Y")
+
+noise_weekly <- noise_ll %>%
+  group_by(year, week) %>%
+  summarise(total_complaints = n(), .groups = "drop")
+
+noise_monthly <- noise_ll %>% 
+  group_by(month) %>%
+  summarise(total_complaints = n(), .groups = "drop")
+
+noise_yearly <- noise_ll %>% 
+  group_by(year) %>%
+  summarise(total_complaints = n(), .groups = "drop")
+```
+
+
+# Graph Complaints (Weekly/Monthly/Yearly)
+```{r}
+ggplot(noise_weekly, aes(x = interaction(year, week), y = total_complaints, group = 1)) +
+  geom_line() +
+  geom_smooth(se = FALSE) +
+  labs(
+    title = "Weekly Street Noise Complaint Counts in NYC",
+    x = "Week",
+    y = "Number of complaints"
+  ) +
+  theme_minimal()
+
+ggplot(noise_monthly, aes(x = month, y = total_complaints, group = 1)) +
+  geom_line() +
+  geom_smooth(se = FALSE) +
+  scale_x_date(
+    date_breaks = "4 months",
+    date_labels = "%Y-%m"
+  ) +
+  labs(
+    title = "Monthly Street Noise Complaint Counts in NYC",
+    x = "Month",
+    y = "Number of complaints"
+  ) +
+  theme_minimal()
+# Highly seasonal with peaks in June and September, troughs in December/January.
+# Break it down by complaint type to see where this is coming from.
+
+ggplot(noise_yearly, aes(x = year, y = total_complaints, group = 1)) +
+  geom_line() +
+  labs(
+    title = "Yearly Street Noise Complaint Counts in NYC",
+    x = "Year",
+    y = "Number of complaints"
+  ) +
+  theme_minimal()
+
+# Identify week-level anomalies (rolling z-score)
+noise_weekly <- noise_weekly %>%
+  arrange(year, week) %>%
+  mutate(
+    roll_mean = rollmean(total_complaints, 8, fill = NA, align = "right"),
+    roll_sd   = rollapply(total_complaints, 8, sd, fill = NA, align = "right"),
+    z = (total_complaints - roll_mean) / roll_sd,
+    spike = z > 2,
+    date = ISOweek2date(paste0(year, "-W", sprintf("%02d", week), "-1"))
+  )
+
+ggplot(noise_weekly, aes(x = date, y = total_complaints)) +
+  geom_line() +
+  geom_line(aes(y = roll_mean), linetype = "dashed") +
+  geom_point(data = subset(noise_weekly, spike), color = "red") +
+  labs(
+    title = "Weekly Street Noise Complaint Counts with Spikes Highlighted",
+    x = "Week",
+    y = "Number of complaints"
+  ) +
+  theme_minimal()
+# No hotspots identified at the 4- or 6-week levels. 
+# Using an 8-week average, 6 hotspots were identified, each between February 20th and April 30th.
+```
+
+
+# Monthly seasonality tests for all types
+```{r}
+noise_monthly_type <- noise_ll %>%
+  group_by(month, Problem.Detail..formerly.Descriptor.) %>%
+  summarise(total_complaints = n(), .groups = "drop")
+
+count(noise_ll, Problem.Detail..formerly.Descriptor.) %>% mutate(`%`  = round(n/sum(n) * 100)) %>% arrange(desc(n))
+
+ggplot(noise_monthly_type, 
+       aes(x = month, y = total_complaints)) +
+  geom_line() +
+  facet_wrap(~ Problem.Detail..formerly.Descriptor., scales = "free_y") +
+  labs(
+    title = "Monthly Noise Complaints by Type",
+    x = "Month",
+    y = "Total Complaints"
+  ) +
+  theme_minimal()
+# The pattern we saw above is largely driven by Loud Music/Party, which accounts for 39% of all complaints.
+# However, similar patterns are also seen in Car/Truck Music (11%), Loud Talking (13%), and Noise, Ice Cream Truck (1%).
+# This breakdown shows that 64% of complaints belong to summer-seasonal categories. While Car/Truck Horn, Engine Idling,
+# Alarms, and Construction-related categories (those potentially closer to siren sounds) don't show seasonality, 
+# most noise complaints filed on the street are more common in June and September.
+```
+
+
+# Monthly seasonality checks from SONYC (and 311 dashboard)
+```{r}
+# Create a timeseries object
+noise_ts <- ts(noise_weekly$total_complaints, frequency = 52, start = c(2016,11))
+
+# Automatically assign best ARIMA model using AIC
+fit_arima <- auto.arima(noise_ts, seasonal = TRUE)
+summary(fit_arima)
+# Best ARIMA model incorporates seasonality.
+
+# Separate trend from seasonality and check for a pattern.
+decomp <- stl(noise_ts, s.window = "periodic")
+plot(decomp)
+# Clear seasonal pattern!
+
+# Compare this to the models recommended by 311 dashboard for related complaints
+fit_naive <- naive(noise_ts)
+fit_tbats <- tbats(noise_ts)
+
+# All models' residuals pass Ljung-Box test: no pattern suggesting the model is missing something systematically. 
+checkresiduals(fit_naive)
+checkresiduals(fit_arima)
+checkresiduals(fit_tbats)
+
+# Cross-validate models and compare MSE
+e_arima <- tsCV(noise_ts, forecastfunction = function(y, h) {
+  forecast(auto.arima(y), h = h)
+})
+
+e_naive <- tsCV(noise_ts, forecastfunction = function(y, h) {
+  forecast(naive(y), h = h)
+})
+
+e_tbats <- tsCV(noise_ts, forecastfunction = function(y, h) {
+  forecast(tbats(y), h = h)
+})
+
+sprintf("ARIMA MSE: %s", format(mean(e_arima^2, na.rm = TRUE), big.mark = ","))
+sprintf("Naive MSE: %s", format(mean(e_naive^2, na.rm = TRUE), big.mark = ","))
+sprintf("TBATS MSE: %s", format(mean(e_tbats^2, na.rm = TRUE), big.mark = ","))
+# Naive model is the best predictor in terms of MSE.
+```
+
+
+# Map Noise Complaints by NTA
+```{r}
+# Too many complaints to look for clusters like we did with SONYC. Let's aggregate complaints per capita at the NTA level.
+noise_sf <- st_as_sf(noise_ll, coords = c("Longitude", "Latitude"), crs = 4326)
+# Read in demographics data from councilcount, replace likely population flukes with 0.
+ntas <- st_read("../Data/nta-demo.geojson") %>% st_transform(st_crs(noise_sf)) %>%
+  select(nta, total_popE, geometry) %>% mutate(total_popE = if_else(total_popE < 100, 0, total_popE))
+noise_with_nta <- st_join(noise_sf, ntas, join = st_within)
+
+nta_counts <- noise_with_nta %>%
+  st_drop_geometry() %>%
+  group_by(nta) %>%
+  summarise(total_complaints = n(), .groups = "drop")
+
+nta_map <- ntas %>%
+  left_join(nta_counts, by = "nta") %>%
+  mutate(
+    total_complaints = coalesce(total_complaints, 0),
+    complaints_pc = case_when(
+      total_complaints == 0 ~ 0,
+      total_popE == 0 ~ NA_real_,
+      TRUE ~ (total_complaints / total_popE) * 1000
+    )
+  )
+
+pal <- colorNumeric(
+  rev(RColorBrewer::brewer.pal(11, "RdYlGn")),
+  domain = sqrt(nta_map$total_complaints)
+)
+
+pal_pc <- colorNumeric(
+  rev(RColorBrewer::brewer.pal(11, "RdYlGn")),
+  domain = sqrt(nta_map$complaints_pc))
+
+# Map raw complaints
+leaflet(nta_map) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal(sqrt(total_complaints)),
+    fillOpacity = 0.7,
+    color = "white",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", nta, "</strong><br>",
+      "Complaints: ", format(total_complaints, big.mark = ",")
+    )
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = ~sqrt(total_complaints),
+    title = "Square Root of Total Complaints"
+  )
+# Total complaints are highest in Hillcrest and Washington Heights.
+# Upper Manhattan, Harlem, Concourse/Mt. Eden, Midtown/Chelsea, and North-Central Brooklyn are other hotspots.
+
+# Map complaints per capita
+leaflet(nta_map) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal_pc(sqrt(complaints_pc)),
+    fillOpacity = 0.7,
+    color = "white",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", nta, "</strong><br>",
+      "Complaints per 1k Residents: ", round(complaints_pc)
+    )
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal_pc,
+    values = ~sqrt(complaints_pc),
+    title = "Square Root of Complaints per 1k Residents"
+  )
+# Hillcrest remains dominant after controlling for population.
+# Midtown, Harlem, and Upper Manhattan remain hotspots. SoHo/Tribeca are more notable at this level too.
+# Concourse/Mt Eden and North-Central Brooklyn still see more complaints than their neighbors, but stand out less.
+```
+
+
+# Test for hotspots
+```{r}
+# Collapse complaints with duplicate locations for cluster analysis
+noise_collapsed <- noise_sf %>%
+  group_by(Location) %>%
+  summarise(
+    total_obs = n(),
+    .groups = "drop"
+  )
+
+# Project for distance-based neighbors (meters)
+noise_collapsed_proj <- st_transform(noise_collapsed, 32618)  # UTM zone 18N for NYC
+
+coords <- st_coordinates(noise_collapsed_proj)
+
+# Define neighbors within 500 m
+neighbors <- dnearneigh(coords, 0, 500)
+weights <- nb2listw(neighbors, style = "W", zero.policy = TRUE)
+
+gi_star <- localG(noise_collapsed_proj$total_obs, listw = weights, zero.policy = TRUE)
+noise_collapsed_proj$GiZ <- as.numeric(gi_star)
+
+noise_collapsed_leaflet <- st_transform(noise_collapsed_proj, 4326)  # back to WGS84
+
+noise_collapsed_leaflet_outliers <- noise_collapsed_leaflet %>% filter(abs(GiZ) > 2.58)
+# "Narrows down" to 12k coordinate pairs identified as hotspots in a 500m radius (significant at 1% level)
+
+pal <- colorNumeric("RdYlBu", domain = noise_collapsed_leaflet_outliers$GiZ, reverse = TRUE)
+
+leaflet(noise_collapsed_leaflet_outliers) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -74.0, lat = 40.7, zoom = 10) %>%
+  addCircleMarkers(
+    radius = 5,
+    color = ~pal(GiZ),
+    fillOpacity = 0.8,
+    stroke = FALSE,
+    popup = ~paste0(
+      "Gi*: ", round(GiZ, 2), "<br>",
+      "Total Obs: ", total_obs
+    )
+  ) %>%
+  addLegend("bottomright", pal = pal, values = ~GiZ, title = "Getis-Ord Gi* Z")
+# This visual came out much better than expected. 
+# The same Queens NTA remains the biggest outlier and clusters are also seen in Upper Manhattan/Harlem/Concourse.
+# Midtown/Tribeca/Soho get their own clusters, and the North-Central Brooklyn group sees pinpoints in Williamsburg and Prospect Lefferts Gardens.
+# Fox Hills also emerges as the complaint hotspot of Staten Island, which was easier to miss at the NTA level.
+```
+
