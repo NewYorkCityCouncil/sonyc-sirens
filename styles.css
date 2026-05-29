@@ -1,0 +1,57 @@
+/* =========================
+  Base body text
+========================= */
+  
+  body {
+    font-size: 12pt;
+    line-height: 1.5;
+  }
+
+/* =========================
+  Title block
+========================= */
+  
+  h1.title {
+    font-size: 24pt;
+    font-weight: 700;
+    line-height: 1.2;
+    margin-bottom: 0.35rem;
+  }
+
+/* Author line */
+  .author {
+    font-size: 12pt;
+    font-weight: 700;
+    margin-bottom: 2.5rem;
+  }
+
+/* Hide date if RStudio inserts blank space */
+  .date {
+    display: none;
+  }
+
+/* =========================
+  Footnotes / citations
+========================= */
+  
+  a.footnote-ref,
+a[href^="#fn"] {
+  text-decoration: none;
+  font-size: 0.8em;
+  vertical-align: super;
+}
+
+.footnote-hover {
+  cursor: help;
+  color: #2c5aa0;
+}
+
+/* Footnote section styling */
+  .footnotes {
+    font-size: 11pt;
+    margin-top: 2rem;
+  }
+
+.footnotes ol {
+  padding-left: 1.25rem;
+}

@@ -62,14 +62,16 @@ ggplot(noise_weekly, aes(x = interaction(year, week), y = total_complaints, grou
   labs(title = "Weekly Street Noise Complaint Counts in NYC", x = "Week", y = "Number of complaints") +
   theme_minimal()
 
-ggplot(noise_monthly, aes(x = month, y = total_complaints, group = 1)) +
+monthly_complaints <- ggplot(noise_monthly, aes(x = month, y = total_complaints, group = 1)) +
   geom_line() +
   geom_smooth(se = FALSE) +
   scale_x_date(date_breaks = "4 months", date_labels = "%Y-%m") +
   labs(title = "Monthly Street Noise Complaint Counts in NYC", x = "Month", y = "Number of complaints") +
   theme_minimal()
+monthly_complaints
 # Complaints ebb and flow month-to-month, with highs between April and June and reliable October spikes.
 # Could be seasonal, check more later.
+saveRDS(monthly_complaints, "../Visuals/monthly_complaints.rds")
 
 ggplot(noise_yearly, aes(x = year, y = total_complaints, group = 1)) +
   geom_line() +
@@ -397,7 +399,7 @@ pal <- leaflet::colorBin(
 
 # Main visual
 ```{r}
-leaflet() %>%
+main_viz <- leaflet() %>%
   
   # Basemap
   addProviderTiles(providers$CartoDB.Positron) %>%
@@ -464,5 +466,10 @@ leaflet() %>%
   
   # Default view
   setView(lng = -74.0, lat = 40.7, zoom = 10)
+
+main_viz
+
+saveRDS(main_viz, "../Visuals/main_viz.rds")
+
 ```
 

@@ -111,7 +111,7 @@ ggplot(siren_yearly, aes(x = year, y = total_sirens, group = 1)) +
   ) +
   theme_minimal()
 
-ggplot(siren_hourly, aes(x = hour, y = total_sirens, group = 1)) +
+hourly_counts <- ggplot(siren_hourly, aes(x = hour, y = total_sirens, group = 1)) +
   geom_line() +
   labs(
     title = "Hourly Siren Counts in NYC",
@@ -120,6 +120,9 @@ ggplot(siren_hourly, aes(x = hour, y = total_sirens, group = 1)) +
   ) +
   coord_cartesian(ylim = c(0, 170)) +
   theme_minimal()
+
+hourly_counts
+saveRDS(hourly_counts, "../Visuals/hourly_counts.rds")
 
 # Identify week-level anomalies (rolling z-score)
 siren_weekly <- siren_weekly %>%
@@ -302,7 +305,7 @@ pal <- colorNumeric(
   domain = sensor_sf_leaflet$siren_rate
 )
 
-leaflet(sensor_sf_leaflet) %>%
+final_sonyc_viz <- leaflet(sensor_sf_leaflet) %>%
   addProviderTiles(providers$CartoDB.Positron) %>%
   setView(lng = -74.0, lat = 40.7, zoom = 10) %>%
   addCircleMarkers(
@@ -319,22 +322,22 @@ leaflet(sensor_sf_leaflet) %>%
     
     fillOpacity = 0.8,
     
-    popup = ~paste0(
-      "<b>Siren Rate:</b> ",
-      round(siren_rate), "%<br>",
-      
-      "<b>Total Sirens:</b> ",
-      total_sirens, "<br>",
-      
-      "<b>Gi* Z-Score:</b> ",
-      round(GiZ, 2),
-      
-      ifelse(
-        hotspot,
-        "<br><b style='color:blue;'>Hotspot (p < 0.01)</b>",
-        ""
-      )
-    )
+popup = ~paste0(
+  "<b>Siren Rate:</b> ",
+  round(siren_rate), "%<br>",
+
+  "<b>Total Sirens:</b> ",
+  total_sirens, "<br>",
+
+  "<b>Gi* Z-Score:</b> ",
+  ifelse(is.na(GiZ), "N/A", as.character(round(GiZ, 2))),
+
+  ifelse(
+    !is.na(hotspot) & hotspot,
+    "<br><b style='color:blue;'>Hotspot (p < 0.01)</b>",
+    ""
+  )
+)
   ) %>%
   addLegend(
     "bottomright",
@@ -343,6 +346,9 @@ leaflet(sensor_sf_leaflet) %>%
     title = "Siren Rate (%)"
   )
 
+final_sonyc_viz
 # Indicates that Downtown Brooklyn might be a siren hotspot compared to Lower Manhattan!
+
+saveRDS(final_sonyc_viz, "../Visuals/final_sonyc.rds")
 ```
 
