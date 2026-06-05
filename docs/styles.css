@@ -18,16 +18,15 @@
   
   h1.title {
     color: #FFFFFF;
-    font-size: 3.5rem;
+    font-size: clamp(2rem, 5vw, 3.5rem);
     font-weight: 700;
-    line-height: 1.2;
+    line-height: 1.15;
     margin-bottom: 0.3rem;
   }
 
 /* Author line */
   .subtitle {
     color: #FFFFFF;
-    font-size: 1.15rem;
     margin-bottom: 2.5rem;
   }
 
@@ -47,25 +46,36 @@
 }
 
 .quarto-title-banner {
+  position: relative;
+
   min-height: 500px;
 
-  background-size: contain;
-  background-repeat: no-repeat;
+  display: flex;
+
+  background-size: cover;
   background-position: center center;
-  
+  background-repeat: no-repeat;
+
   background-color: rgba(0,0,0,.4);
   background-blend-mode: multiply;
 }
 
 .quarto-title-banner .quarto-title-block {
   position: relative;
-  z-index: 2;
+  z-index: 10;
+  padding: 2rem 0 3rem 0;
 }
 
 /* Hide date if RStudio inserts blank space */
   .date {
     display: none;
   }
+
+@media (max-width: 768px) {
+  .quarto-title-banner {
+    min-height: 420px;
+  }
+}
 
 /* =========================
   Leaflet Widgets
