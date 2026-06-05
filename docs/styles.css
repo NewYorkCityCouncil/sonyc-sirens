@@ -47,7 +47,7 @@
 }
 
 .quarto-title-banner {
-  height: 500px;
+  min-height: 500px;
 
   background-size: contain;
   background-repeat: no-repeat;
